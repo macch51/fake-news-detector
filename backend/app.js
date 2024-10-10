@@ -2,7 +2,13 @@ require('dotenv').config(); // Load environment variables from .env file
 const express = require('express');
 const app = express();
 const apiRoutes = require('./routes/apiRoutes'); // Ensure the correct path is used
+const cors = require('cors'); // Import the cors middleware
 
+app.use(cors({
+  origin: 'http://localhost:3005', // Your frontend's URL
+  methods: ['GET', 'POST'], // Specify allowed methods
+  credentials: true
+}));
 // Middleware for parsing JSON requests
 app.use(express.json()); 
 

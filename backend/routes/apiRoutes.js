@@ -4,5 +4,6 @@ const apiController = require('../controllers/apiController');
 
 // Route to fetch news from external API
 router.get('/news', apiController.getNews);
+router.post('/check-news', apiController.checkNews);
 
 module.exports = router;
