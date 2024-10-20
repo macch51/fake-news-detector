@@ -1,120 +1,157 @@
 const axios = require('axios');
-const { newsApiKey } = require('../config/apiKeys');
-const { guardianApiKey } = require('../config/apiKeys');
+require('dotenv').config(); // Load environment variables
 
-exports.getNews = async (req, res) => {
-    const query = req.query.q
-    //Calculate the date 7 days ago from today
-    const date = new Date();
-    const oneWeekAgo = new Date(date.getTime() - 7 * 24 * 60 * 60 * 1000);
-    const formattedDate = oneWeekAgo.toISOString().split('T')[0];
-    try {
-        const response = await axios.get(`https://newsapi.org/v2/everything?q=${query}&from=${formattedDate}&apiKey=${newsApiKey}`);
-        res.json(response.data.articles);
-    } catch (error) {
-        console.log(error)
-        res.status(500).send('Error fetching news');
+const { newsApiKey, guardianApiKey } = require('../config/apiKeys');
+const { getSimilarityScore } = require('../utils/nlpUtils');
+
+// Extract keywords by removing special characters
+function extractKeywords(newsText) {
+  if (!newsText || typeof newsText !== 'string') {
+    throw new Error('Invalid news text'); // Ensure newsText is a valid string
+  }
+
+  const cleanedText = newsText.replace(/[^\w\s]/gi, ''); // Removes special characters
+  const keywordsArray = cleanedText.split(/\s+/); // Split into words
+  return keywordsArray.slice(0, 5).join(' '); // Return first 5 words
+}
+
+// Get the date of last week
+function getLastWeekDate() {
+  const date = new Date();
+  date.setDate(date.getDate() - 7); // Go back 7 days
+  return date.toISOString().split('T')[0]; // Return YYYY-MM-DD format
+}
+
+// Fetch fact-checking results from Google Fact-Check Tools API
+async function getFactCheckResults(keywords) {
+  const googleApiKey = process.env.GOOGLE_API_KEY; // Load from .env
+  const factCheckUrl = `https://factchecktools.googleapis.com/v1alpha1/claims:search?query=${encodeURIComponent(keywords)}&key=${googleApiKey}`;
+
+  try {
+    const response = await axios.get(factCheckUrl);
+    return response.data.claims || [];
+  } catch (error) {
+    console.error('Error fetching fact-check results:', error.message);
+    return [];
+  }
+}
+
+// Fetch articles from The Guardian API
+async function getGuardianArticles(keywords) {
+  const guardianApiUrl = `https://content.guardianapis.com/search?q=${encodeURIComponent(keywords)}&from-date=${getLastWeekDate()}&api-key=${guardianApiKey}`;
+
+  try {
+    const response = await axios.get(guardianApiUrl);
+    return processGuardianResponse(response.data); // Use the processing function here
+  } catch (error) {
+    console.error('Error fetching Guardian articles:', error.message);
+    return [];
+  }
+}
+
+// Fetch articles from NewsAPI
+async function getNewsApiArticles(keywords) {
+  const newsApiUrl = `https://newsapi.org/v2/everything?q=${encodeURIComponent(keywords)}&from=${getLastWeekDate()}&apiKey=${newsApiKey}`;
+
+  try {
+    const response = await axios.get(newsApiUrl);
+    return processNewsApiResponse(response.data); // Use the processing function here
+  } catch (error) {
+    console.error('Error fetching NewsAPI articles:', error.message);
+    return [];
+  }
+}
+
+// Main function to check if the news is fake or real
+exports.checkNews = async (req, res) => {
+  const { articleText } = req.body;
+
+  if (!articleText || typeof articleText !== 'string') {
+    return res.status(400).json({ error: 'Article text is required and must be a string' });
+  }
+  try {
+    // Extract keywords
+    const keywords = extractKeywords(articleText);
+
+    // Fetch results from multiple sources
+    const [factCheckResults, guardianArticles, newsApiArticles] = await Promise.all([
+      getFactCheckResults(keywords),
+      getGuardianArticles(keywords),
+      getNewsApiArticles(keywords),
+    ]);
+
+    // Combine all articles for easier processing
+    const allArticles = [
+      ...factCheckResults.map(result => ({
+        title: result.claimReview.title,
+        date: result.claimReview.date,
+        url: result.claimReview.url,
+        source: 'Fact-Check',
+        similarityScore: getSimilarityScore(articleText, result.claimReview.title),
+      })),
+      ...guardianArticles.map(article => ({
+        title: article.title,
+        url: article.url,
+        date: article.date,
+        source: 'The Guardian',
+        similarityScore: getSimilarityScore(articleText, article.title),
+      })),
+      ...newsApiArticles.map(article => ({
+        title: article.title,
+        url: article.url,
+        date: article.date,
+        source: 'NewsAPI',
+        similarityScore: getSimilarityScore(articleText, article.title),
+      })),
+    ];
+    // Check if there's a total match (similarity score close to 1)
+    const exactMatch = allArticles.find(article => article.similarityScore >= 0.95);
+
+    if (exactMatch) {
+      // Return only the exact match if found
+      return res.json({
+        isFake: false,
+        exactMatch,
+      });
+    } else {
+      // If no exact match, return the top 4 results sorted by similarity score
+      const topResults = allArticles
+        .sort((a, b) => b.similarityScore - a.similarityScore) // Sort by similarity score in descending order
+        .slice(0, 4); // Get top 4 results
+
+      // Determine if news is likely fake based on absence of fact-check results
+      const isFake = topResults.length === 0;
+      return res.json({
+        isFake: isFake,
+        topResults,
+      });
     }
+  } catch (error) {
+    console.error('Error checking news:', error.message);
+    res.status(500).json({ error: 'An error occurred while checking the news' });
+  }
 };
 
-
-/*
-exports.checkNews = async (req, res) => {
-    const { articleText } = req.body;
-    if (!articleText) {
-        return res.status(400).json({ error: 'Article text is required' });
-    }
-
-    try {
-        const keywords = extractKeywords(articleText);
-
-        const newsApiUrl = `https://newsapi.org/v2/everything?q=${encodeURIComponent(keywords)}&from=${getLastWeekDate()}&apiKey=${newsApiKey}`;
-        const newsApiResponse = await axios.get(newsApiUrl);
-
-        const guardianApiUrl = `https://content.guardianapis.com/search?q=${encodeURIComponent(keywords)}&from-date=${getLastWeekDate()}&api-key=${guardianApiKey}`;
-        console.log(guardianApiUrl)
-        const guardianApiResponse = await axios.get(guardianApiUrl);
-
-        const allResults = [...newsApiResponse.data.articles, ...guardianApiResponse.data.response.results];
-
-        res.status(200).json({ results: allResults });
-    } catch (error) {
-        console.error('Error fetching news:', error);
-        res.status(500).json({ error: 'Error fetching news' });
-    }
-};*/
-
-exports.checkNews = async (req, res) => {
-    const { articleText } = req.body;
-    if (!articleText) {
-        return res.status(400).json({ error: 'Article text is required' });
-    }
-    try {
-        const keywords = extractKeywords(articleText);
-
-        const newsApiUrl = `https://newsapi.org/v2/everything?q=${encodeURIComponent(keywords)}&from=${getLastWeekDate()}&apiKey=${newsApiKey}`;
-        const guardianApiUrl = `https://content.guardianapis.com/search?q=${encodeURIComponent(keywords)}&from-date=${getLastWeekDate()}&api-key=${guardianApiKey}`;
-        
-      const newsApiResponse = await axios.get(newsApiUrl);
-      const guardianResponse = await axios.get(guardianApiUrl);
-      
-      // Process both responses
-      const guardianArticles = processGuardianResponse(guardianResponse.data);
-      const newsApiArticles = processNewsApiResponse(newsApiResponse.data);
-      
-      // Combine the articles
-      const combinedArticles = [...guardianArticles, ...newsApiArticles];
-  
-      // Display or process the combined articles
-      console.log(JSON.stringify({ results: combinedArticles }, null, 2));
-      res.status(200).json({ results: combinedArticles });
-
-    } catch (error) {
-      console.error('Error fetching news:', error);
-    }
-  }
-  
+// Process responses from The Guardian API
 function processGuardianResponse(data) {
-    if (data && data.response && data.response.status === 'ok') {
-      const articles = data.response.results.map(article => {
-        return {
-          title: article.webTitle,
-          url: article.webUrl,
-          publishedAt: article.webPublicationDate
-        };
-      });
-      return articles;
-    } else {
-      return [];
-    }
+  if (data && data.response && data.response.status === 'ok') {
+    return data.response.results.map(article => ({
+      title: article.webTitle,
+      url: article.webUrl,
+      publishedAt: article.webPublicationDate,
+    }));
   }
+  return [];
+}
 
-  function processNewsApiResponse(data) {
-    if (data && data.status === 'ok') {
-      const articles = data.articles.map(article => {
-        return {
-          title: article.title,
-          url: article.url,
-          publishedAt: article.publishedAt
-        };
-      });
-      return articles;
-    } else {
-      return [];
-    }
+// Process responses from NewsAPI
+function processNewsApiResponse(data) {
+  if (data && data.status === 'ok') {
+    return data.articles.map(article => ({
+      title: article.title,
+      url: article.url,
+      publishedAt: article.publishedAt,
+    }));
   }
-
-function extractKeywords(text) {
-    // Remove all special characters (except letters and spaces)
-    const cleanedText = text.replace(/[^\w\s]/gi, ''); // Removes non-word characters
-    // Split the text into individual words
-    const words = cleanedText.split(/\s+/);
-    
-    // Return an array of the words
-    return words;
-  }
-function getLastWeekDate() {
-    const today = new Date();
-    const lastWeek = new Date(today.setDate(today.getDate() - 7));
-    return lastWeek.toISOString().split('T')[0];
+  return [];
 }
